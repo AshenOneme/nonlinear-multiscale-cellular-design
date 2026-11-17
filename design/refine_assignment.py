@@ -9,8 +9,8 @@ import numpy as np,h5py
 from scipy.optimize import milp,Bounds,LinearConstraint
 from scipy.sparse import csr_matrix,vstack
 from PIL import Image
-import initial_plane_compatibility_proxy_v1 as proxy
-from material_motion_metrics_v1 import prepare,evaluate
+import initial_compatibility as proxy
+from material_motion import prepare,evaluate
 def sha(p):return hashlib.sha256(p.read_bytes()).hexdigest()
 def save(p,q):p.write_text(json.dumps(q,indent=2,ensure_ascii=False,allow_nan=False)+'\n',encoding='utf8')
 def work(curve,cumulative,d):
@@ -20,7 +20,7 @@ def work(curve,cumulative,d):
  f=y[k]+(y[k+1]-y[k])*(d-x[k])/(x[k+1]-x[k])
  return float(cumulative[k]+.5*(y[k]+f)*(d-x[k]))
 def main():
- ap=argparse.ArgumentParser();ap.add_argument('--project',type=Path,required=True);ap.add_argument('--demand',type=Path,required=True);ap.add_argument('--metrics',type=Path,required=True);ap.add_argument('--out',type=Path,required=True);ap.add_argument("--model-store",type=Path,required=True);a=ap.parse_args()
+ ap=argparse.ArgumentParser();ap.add_argument('--prior-log',type=Path,required=True);ap.add_argument('--prior-log-sha',required=True);ap.add_argument('--project',type=Path,required=True);ap.add_argument('--demand',type=Path,required=True);ap.add_argument('--metrics',type=Path,required=True);ap.add_argument('--out',type=Path,required=True);ap.add_argument("--model-store",type=Path,required=True);a=ap.parse_args()
  r=a.project.resolve();o=a.out.resolve()
  o.mkdir(parents=True,exist_ok=True);assert not(o/'proposal_immutable.json').exists()
  demand=json.loads(a.demand.read_text(encoding='utf-8'));metrics=json.loads(a.metrics.read_text(encoding='utf-8-sig'))
@@ -54,13 +54,20 @@ def main():
  energy=np.array([np.mean([demand_by[q]['plastic_dissipation_full_nominal2_cycle_Nmm'] for q in g]) for g in groups])
  positive=energy[energy>max(1.,energy.max())*1e-7];assert len(positive)>0
  median=float(np.median(positive));target=energy/median
- betas=[]
+ betas=[];direction_proxy_fallback=[]
  for group in groups:
-  sx=sy=0.
-  for rc in group:
-   for s in demand_by[rc]['signed_states'].values():
-    sx+=work(rawx[ref],wx[ref],abs(s['engineering_shear_boundary_amplitude_mm']))
-    sy+=work(rawy[ref],wy[ref],s['compression_y_amplitude_mm'])
+  samples=[s for rc in group for s in demand_by[rc]['signed_states'].values()]
+  outside=any(abs(s['engineering_shear_boundary_amplitude_mm'])>rawx[ref,-1,0]+1e-9 or s['compression_y_amplitude_mm']>abs(rawy[ref,-1,0])+1e-9 for s in samples)
+  direction_proxy_fallback.append(outside);sx=sy=0.
+  for s in samples:
+   dx=abs(s['engineering_shear_boundary_amplitude_mm']);dy=s['compression_y_amplitude_mm']
+   if outside:
+    # Only a direction-mixture weight. Actual deformation is retained, not
+    # clipped; no native curve outside 0..5 mm is evaluated or extrapolated.
+    sx+=C[ref,2,2]*(dx/100)**2
+    sy+=(C[ref,1,1]-C[ref,0,1]**2/C[ref,0,0])*(dy/100)**2
+   else:
+    sx+=work(rawx[ref],wx[ref],dx);sy+=work(rawy[ref],wy[ref],dy)
   betas.append(sx/(sx+sy) if sx+sy>0 else .5)
  beta=np.array(betas);cap=beta[:,None]*W2x+(1-beta[:,None])*W2y
  cap_ref=beta*W2x[ref]+(1-beta)*W2y[ref]
@@ -105,22 +112,27 @@ def main():
  for k,g in enumerate(groups):
   for which,rc in enumerate(g):site_of[lookup[rc]]=k;mirror_of[lookup[rc]]=symmetric and which==1
  base=proxy.solve(mask,np.repeat(C[ref][None],len(cells),axis=0));Kbase=base['K']
- registration={'method':'median_actual_cycle_plastic_energy_plus_signed_stress_flow_and_initial_compatibility_proxy_v1',
+ registration={'method':'energy_assignment_same_inventory_shared_equilibrium_swap_repair_v5',
   'source_demand_SHA':sha(a.demand),'source_metrics_SHA':sha(a.metrics),'source_fields_SHA':sha(fp),
   'candidate_proof_SHA':sha(cache/'qualification_immutable.json'),'selector_SHA':sha(Path(__file__)),
   'initial_proxy_module_SHA':sha(Path(proxy.__file__)),'before_any_new_H_FE':True,
   'canonical_unit_capacity_probe_mm':2,'capacity_measure':'original native monotonic loading work only',
   'energy_target':'paired actual full2%cycle ELPD increment / median positive paired increments; baseline8624 anchored',
   'assignment_metric':'squared asinh(capacity_ratio-1) distance to asinh(demand_ratio-1); no field rescaling',
-  'direction_mix':'homogeneous native work fractions at each actual signed compression/shear deformation',
+  'direction_mix':'native work fractions within measured curve domain; whole-group initial-elastic kinematic modal weight only when any native test domain is exceeded',
+  'direction_mix_elastic_fallback_groups':int(sum(direction_proxy_fallback)),
+  'out_of_range_deformation_preserved_no_curve_extrapolation_or_clipping':True,
+  'fallback_is_not_actual_cyclic_energy_partition':True,
   'maximum_dictionary_types':20,'force_minimum_type_count':False,'median_anchor_group':int(np.argmin(abs(target-1))),
   'pixel_budget':'exact equality to corresponding original8624; also <=min(Q02,1.20all9481)',
   'initial_compatibility_constraint':'K_proxy(layout)>=K_proxy(all8624); concave Dirichlet energy outer-approximation',
   'initial_proxy_scope':'periodic linear elastic Q4 only; not a nonlinear port or qualified true wall response',
   'D03_known_initial_proxy_baseline_RF_error_relative_to_true_U':-.2042265146663853 if demand['macro_case']=='D03_wide_door' else None,
   'no_RF_or_stress_calibration_applied':True,'new_H_true_initial_and_cyclic_FE_required':True,
-  'lexicographic_flow_step':'minimize actual signed/IP stress-shape elastic compliance only within attained energy fit; not physical cyclic energy',
-  'solver_time_limit_per_call_seconds':20,'maximum_outer_cuts':12,'physical_advantage_claimed':False}
+  'lexicographic_flow_step':'flow diagnostic/tie-break retained; no secondary global optimum claimed',
+  'source_prior_v2_log_SHA':a.prior_log_sha,'original_type_inventory_and_pixel_budget_preserved':True,
+  'physical_constraints_and_energy_fit_objective_unchanged':True,'actual_H_FE_results_used':False,
+  'solver_time_limit_per_call_seconds':20,'maximum_repair_swaps':40,'maximum_energy_swaps':80,'maximum_actual_equilibrium_trials_per_swap':20,'physical_advantage_claimed':False}
  save(o/'registration_before_assignment.json',registration)
  patch=proxy.analytic_checks();anchor=registration['median_anchor_group'];nvar=ns*nc
  baseA=csr_matrix((np.ones(nvar),(np.repeat(np.arange(ns),nc),np.arange(nvar))),shape=(ns,nvar))
@@ -137,7 +149,7 @@ def main():
   return csr_matrix((gradient/Kbase).reshape(1,-1))
  matrices.append(cut(base));lower.append(1.);upper.append(np.inf)
  def optimize(objective,phase):
-  for it in range(12):
+  for it in range(48):
    Aall=vstack(matrices).tocsr()
    result=milp(objective,integrality=np.ones(nvar),bounds=bounds,
     constraints=LinearConstraint(Aall,np.array(lower),np.array(upper)),
@@ -148,15 +160,55 @@ def main():
    equilibrium=proxy.solve(mask,C_layout(indices));relative=equilibrium['K']/Kbase
    record={'phase':phase,'iteration':it,'milp_status':int(result.status),'mip_gap':float(getattr(result,'mip_gap',0)),
     'energy_fit':float(np.sum(cost[:,palette]*np.eye(nc)[indices])),'K_proxy_ratio':relative,'types':len(set(indices.tolist())),
-    'material_pixels':material,'actual_microstructural_FE_performed':False}
+    'material_pixels':material,'actual_microstructural_FE_performed':False,'selected_palette_indices':indices.tolist()}
    records.append(record);print(json.dumps(record),flush=True);save(o/'assignment_iteration_log.json',records)
    if relative>=1-1e-7:return indices,equilibrium,result
    matrices.append(cut(equilibrium));lower.append(1.);upper.append(np.inf)
   raise RuntimeError('Initial compatibility outer approximation unresolved; no unqualified H submission')
- eobj=cost[:,palette].ravel();indices,equilibrium,solver=optimize(eobj,'energy')
- energy_best=float(eobj@np.eye(nc)[indices].ravel())
- matrices.append(csr_matrix(eobj.reshape(1,-1)));lower.append(-np.inf);upper.append(energy_best+1e-5*max(1,energy_best))
- indices,equilibrium,solver2=optimize(flow[:,palette].ravel(),'stress_shape_secondary')
+ assert sha(a.prior_log)==a.prior_log_sha
+ prior=json.loads(a.prior_log.read_text(encoding='utf-8'));candidate=max((q for q in prior if q['phase']=='energy'),key=lambda q:q['K_proxy_ratio'])
+ indices=np.array(candidate['selected_palette_indices'],dtype=int);assert len(indices)==ns and indices[anchor]==0 and np.all((indices>=0)&(indices<nc))
+ inventory=np.bincount(indices,weights=mult,minlength=nc).astype(int);eobj=cost[:,palette];fobj=flow[:,palette]
+ def assess(idx):
+  assert idx[anchor]==0 and np.array_equal(np.bincount(idx,weights=mult,minlength=nc).astype(int),inventory)
+  assert int(np.sum(mult*pixels[palette[idx]]))==len(cells)*int(pixels[ref])
+  eq=proxy.solve(mask,C_layout(idx));fit=float(eobj[np.arange(ns),idx].sum());return eq,eq['K']/Kbase,fit
+ equilibrium,K,fit=assess(indices);assert abs(K-candidate['K_proxy_ratio'])<1e-9 and abs(fit-candidate['energy_fit'])<1e-9
+ records=[]
+ def record(phase,it):
+  q={'phase':phase,'iteration':it,'K_proxy_ratio':K,'energy_fit':fit,'types':len(set(indices.tolist())),'selected_palette_indices':indices.tolist(),'same_inventory_verified':True,'material_pixels':int(len(cells)*pixels[ref]),'actual_H_FE_performed':False};records.append(q);save(o/'assignment_iteration_log.json',records);print(json.dumps({k:v for k,v in q.items() if k!='selected_palette_indices'}),flush=True)
+ record('replayed_start',0)
+ pairs=[(i,j) for i in range(ns) for j in range(i+1,ns) if i!=anchor and j!=anchor and mult[i]==mult[j]]
+ for it in range(40):
+  if K>=1-1e-7:break
+  gradient=cut(equilibrium).toarray().reshape(ns,nc);candidates=[]
+  for i,j in pairs:
+   a,b=indices[i],indices[j]
+   if a==b:continue
+   gain=gradient[i,b]+gradient[j,a]-gradient[i,a]-gradient[j,b]
+   if gain>1e-9:candidates.append((-gain,float(eobj[i,b]+eobj[j,a]-eobj[i,a]-eobj[j,b]),i,j))
+  candidates.sort();best=None
+  for _,de,i,j in candidates[:20]:
+   idx=indices.copy();idx[i],idx[j]=idx[j],idx[i];eq,kk,ff=assess(idx)
+   if kk>K+1e-9 and (best is None or kk>best[2]+1e-12 or (abs(kk-best[2])<1e-12 and ff<best[3])):best=(idx,eq,kk,ff)
+  if best is None:break
+  indices,equilibrium,K,fit=best;record('proxy_stiffness_inventory_repair',it)
+ assert K>=1-1e-7,'Inventory repair unresolved; original constraints not relaxed'
+ for it in range(80):
+  gradient=cut(equilibrium).toarray().reshape(ns,nc);candidates=[]
+  for i,j in pairs:
+   a,b=indices[i],indices[j]
+   if a==b:continue
+   delta=float(eobj[i,b]+eobj[j,a]-eobj[i,a]-eobj[j,b]);gain=gradient[i,b]+gradient[j,a]-gradient[i,a]-gradient[j,b]
+   if delta<-1e-9 and K+gain>=1-1e-7:candidates.append((delta,float(fobj[i,b]+fobj[j,a]-fobj[i,a]-fobj[j,b]),i,j))
+  candidates.sort();best=None
+  for delta,df,i,j in candidates[:20]:
+   idx=indices.copy();idx[i],idx[j]=idx[j],idx[i];eq,kk,ff=assess(idx)
+   if kk>=1-1e-7 and ff<fit-1e-9:best=(idx,eq,kk,ff);break
+  if best is None:break
+  indices,equilibrium,K,fit=best;record('energy_improvement_same_inventory_and_feasible_K',it)
+ assert fit<float(cost[:,ref].sum()),'No improvement over uniform energy-fit proxy'
+ record('final_local_solution_no_global_optimum_claim',0)
  selected=palette[indices];matrix=np.full(mask.shape,-1,dtype=np.int32);reflect=np.zeros(mask.shape,bool)
  for k,g in enumerate(groups):
   for which,(rr,cc) in enumerate(g):matrix[rr,cc]=rows[selected[k]];reflect[rr,cc]=symmetric and which==1
