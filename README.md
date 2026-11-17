@@ -11,6 +11,19 @@ The design method assigns different cell geometries across a structure by matchi
 3. **Assign cells under member-level constraints.** Weight each cell’s compression and shear work by the local loading mode, then match the resulting capacity to regional demand. Constrain the assignment by interface compatibility, total material volume and initial member stiffness.
 4. **Assemble and evaluate.** Place the selected cells within the member geometry and evaluate its cyclic response with a detailed solid finite-element model.
 
+## Python implementation
+
+The [design folder](./design/) contains the core Python source for candidate screening, nonlinear compression and shear work, and constrained cell assignment.
+
+| Source | Role |
+| --- | --- |
+| [Candidate screening](./design/prepare_screened_energy_flow_candidates_v1.py) | Match cell interfaces, pair response curves with elastic tensors, and build the screened candidate cache. |
+| [Cell assignment](./design/propose_H_energy_flow_compatibility_pixels_v2.py) | Match regional demand to weighted cell work and enforce material and initial-stiffness requirements. |
+| [Inventory repair](./design/propose_H_energy_flow_inventory_repair_v5.py) | Refine the cell inventory under the same assignment and compatibility requirements. |
+| [Compatibility proxy](./design/initial_plane_compatibility_proxy_v1.py) and [direction metrics](./design/material_motion_metrics_v1.py) | Evaluate initial in-plane compatibility and local loading directions. |
+
+The Python programs depend on NumPy, SciPy, h5py and Pillow. The screening and assignment commands take explicit `--project`, `--model-store` and `--out` paths. Use `--help` on each script for its other inputs. Running the design from scratch requires the corresponding candidate bank, elastic tensor records and reference demand data. The assignment stage returns a cell map and pixel layout. The prebuilt Abaqus decks below can be used independently.
+
 ## Application to walls with openings
 
 ![The eight proposed heterogeneous wall geometries D1, D2, D3, W1, W2, W3, M1 and W4](./wall-layouts.png)
